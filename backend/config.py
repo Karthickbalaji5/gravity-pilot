@@ -30,8 +30,11 @@ class Settings(BaseSettings):
     ollama_model: str = "llama3:latest"
 
     # ── Server ────────────────────────────────────────────────────────────────
-    api_host: str = "0.0.0.0"
+    api_host: str = "127.0.0.1"
     api_port: int = 8000
+
+    # ── Agent Mode ────────────────────────────────────────────────────────────
+    use_legacy_graph: bool = False
 
     # ── Database ──────────────────────────────────────────────────────────────
     db_path: str = "./data/desktoppilot.db"

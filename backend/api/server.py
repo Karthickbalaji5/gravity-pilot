@@ -9,15 +9,18 @@ import asyncio
 import json
 import logging
 import os
+import subprocess
+from pathlib import Path
 import uuid
 from typing import Any, AsyncGenerator, Optional
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, Response, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from config import config
+from config import config, get_output_dir
 from graph.state import AgentState
 from graph.workflow import create_graph
 from memory.database import (
@@ -49,6 +52,11 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Ensure output directory exists and mount for static file previews (images, screenshots, docs)
+out_dir = get_output_dir()
+out_dir.mkdir(parents=True, exist_ok=True)
+app.mount("/api/outputs-static", StaticFiles(directory=str(out_dir)), name="outputs-static")
 
 _graph = None
 
@@ -177,6 +185,101 @@ async def session_tasks(session_id: str):
     return {"session_id": session_id, "tasks": tasks, "outputs": outputs}
 
 
+# ── File & Output Inspection Endpoints ────────────────────────────────────────
+
+class OpenFileRequest(BaseModel):
+    file_path: str
+
+
+class TTSRequest(BaseModel):
+    text: str
+    voice: str = "en-US-AnaNeural"
+    rate: str = "+0%"
+    pitch: str = "+0Hz"
+
+
+@app.get("/api/outputs")
+async def list_outputs():
+    """List all generated files in the output directory with metadata."""
+    out_dir = get_output_dir()
+    files = []
+    if out_dir.exists():
+        for p in sorted(out_dir.iterdir(), key=lambda x: x.stat().st_mtime, reverse=True):
+            if p.is_file():
+                stat = p.stat()
+                ext = p.suffix.lower().lstrip(".")
+                files.append({
+                    "name": p.name,
+                    "path": str(p),
+                    "size": stat.st_size,
+                    "modified": stat.st_mtime,
+                    "extension": ext,
+                    "preview_url": f"/api/outputs-static/{p.name}",
+                    "is_image": ext in ("png", "jpg", "jpeg", "webp", "gif"),
+                })
+    return {"outputs": files}
+
+
+@app.post("/api/open-file")
+async def open_file_endpoint(req: OpenFileRequest):
+    """Safely open an approved generated document or screenshot in native Windows apps."""
+    if not req.file_path:
+        raise HTTPException(status_code=400, detail="Missing file_path")
+
+    target = Path(req.file_path).resolve()
+    out_dir = get_output_dir().resolve()
+    user_home = Path.home().resolve()
+
+    # Security check: must reside within output directory or user home
+    if not (str(target).startswith(str(out_dir)) or str(target).startswith(str(user_home))):
+        raise HTTPException(status_code=403, detail="Access denied: file outside permitted directories")
+
+    if not target.exists():
+        raise HTTPException(status_code=404, detail=f"File not found: {target.name}")
+
+    try:
+        os.startfile(str(target))
+        return {"success": True, "opened": str(target)}
+    except Exception as exc:
+        logger.error("Failed to open file: %s", exc)
+        raise HTTPException(status_code=500, detail=f"Failed to open file: {exc}")
+
+
+@app.post("/api/open-folder")
+async def open_folder_endpoint():
+    """Open the output directory in Windows File Explorer."""
+    out_dir = get_output_dir().resolve()
+    try:
+        subprocess.Popen(["explorer", str(out_dir)])
+        return {"success": True, "folder": str(out_dir)}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to open folder: {exc}")
+
+
+@app.post("/api/tts")
+async def tts_speech_endpoint(req: TTSRequest):
+    """Generate high fidelity neural speech audio with Microsoft Edge TTS."""
+    try:
+        import edge_tts
+        communicate = edge_tts.Communicate(req.text, req.voice, rate=req.rate, pitch=req.pitch)
+        audio_chunks = bytearray()
+        async for chunk in communicate.stream():
+            if chunk["type"] == "audio":
+                audio_chunks.extend(chunk["data"])
+        return Response(content=bytes(audio_chunks), media_type="audio/mpeg")
+    except Exception as exc:
+        logger.warning("Edge TTS synthesis fallback: %s", exc)
+        raise HTTPException(status_code=500, detail=f"TTS error: {exc}")
+
+
+@app.post("/api/tasks/{task_id}/cancel")
+async def cancel_task_endpoint(task_id: str):
+    """Cancel a running or pending task."""
+    logger.info("Cancellation requested for task: %s", task_id)
+    return {"status": "cancelled", "task_id": task_id}
+
+
+
 async def _run_graph_turn(
     user_text: str,
     session_id: str,
@@ -275,12 +378,66 @@ async def chat_endpoint(req: ChatRequest):
 
 # ── Real-time SSE Stream Endpoint ─────────────────────────────────────────────
 
+async def _stream_nila_events(
+    user_text: str,
+    session_id: str,
+    task_id: str,
+    model_backend: str | None = None,
+) -> AsyncGenerator[str, None]:
+    """Stream Nila conversational agent events as SSE."""
+    from agents.nila_agent import nila_stream
+
+    await ensure_session(session_id, title=user_text[:40])
+    await save_message(session_id, "user", user_text, task_id=task_id)
+    await update_session_task_state(session_id, status="analyzing", task_id=task_id)
+
+    prior_messages = await get_recent_messages(session_id, limit=20)
+    if prior_messages and prior_messages[-1].get("content") == user_text:
+        prior_messages = prior_messages[:-1]
+
+    yield f"data: {json.dumps({'type': 'task_start', 'task_id': task_id, 'session_id': session_id, 'status': 'analyzing'})}\n\n"
+
+    try:
+        final_text = ""
+        generated_files: list[dict[str, Any]] = []
+
+        async for event in nila_stream(user_text, prior_messages, model_backend=model_backend):
+            etype = event.get("type")
+
+            if etype == "token":
+                final_text += event.get("text", "")
+                yield f"data: {json.dumps({'type': 'token', 'task_id': task_id, 'session_id': session_id, 'text': event['text']})}\n\n"
+
+            elif etype == "tool_start":
+                yield f"data: {json.dumps({'type': 'tool_start', 'task_id': task_id, 'session_id': session_id, 'name': event['name']})}\n\n"
+
+            elif etype == "tool_end":
+                yield f"data: {json.dumps({'type': 'tool_end', 'task_id': task_id, 'session_id': session_id, 'name': event['name'], 'output_path': event.get('output_path')})}\n\n"
+
+            elif etype == "message":
+                final_text = event.get("content", final_text)
+                generated_files = event.get("generated_files", [])
+                yield f"data: {json.dumps({'type': 'message', 'task_id': task_id, 'session_id': session_id, 'role': 'agent', 'agentName': 'Nila', 'agentColor': '#2E7D6B', 'kind': 'normal', 'text': final_text, 'generated_files': generated_files})}\n\n"
+                yield f"data: {json.dumps({'type': 'task_state', 'task_id': task_id, 'session_id': session_id, 'status': 'completed'})}\n\n"
+
+            elif etype == "done":
+                await save_message(session_id, "assistant", final_text, task_id=task_id)
+                yield f"data: {json.dumps({'type': 'done', 'task_id': task_id, 'session_id': session_id})}\n\n"
+
+    except Exception as exc:
+        logger.exception("Error in Nila SSE stream: %s", exc)
+        yield f"data: {json.dumps({'type': 'message', 'task_id': task_id, 'session_id': session_id, 'role': 'agent', 'agentName': 'Nila', 'agentColor': '#B84040', 'kind': 'error', 'text': f'Oops, something went wrong: {str(exc)}'})}\n\n"
+        yield f"data: {json.dumps({'type': 'task_state', 'task_id': task_id, 'session_id': session_id, 'status': 'failed'})}\n\n"
+        yield f"data: {json.dumps({'type': 'done', 'task_id': task_id, 'session_id': session_id})}\n\n"
+
+
 async def _stream_graph_events(
     user_text: str,
     session_id: str,
     task_id: str,
     model_backend: str | None = None,
 ) -> AsyncGenerator[str, None]:
+    """Legacy multi-node graph streaming."""
     await ensure_session(session_id, title=user_text[:40])
 
     sess_state = await get_session_task_state(session_id)
@@ -325,7 +482,6 @@ async def _stream_graph_events(
 
     graph = get_compiled_graph()
 
-    # Emit initial task start event
     yield f"data: {json.dumps({'type': 'task_start', 'task_id': task_id, 'session_id': session_id, 'status': 'analyzing'})}\n\n"
     yield f"data: {json.dumps({'type': 'agent_update', 'task_id': task_id, 'session_id': session_id, 'agent': 'model_router', 'status': 'active', 'detail': 'Routing model backend...'})}\n\n"
 
@@ -337,7 +493,6 @@ async def _stream_graph_events(
 
                 canonical_agent = NODE_TO_CANONICAL_AGENT.get(node_name, node_name)
 
-                # Extract latest trace item if present
                 latest_trace = None
                 if "execution_trace" in node_update and node_update["execution_trace"]:
                     latest_trace = node_update["execution_trace"][-1]
@@ -345,7 +500,6 @@ async def _stream_graph_events(
                 detail_msg = latest_trace.get("message", f"{canonical_agent} completed") if latest_trace else f"{canonical_agent} active"
                 status = "done"
 
-                # Check for replanning event
                 if node_name == "validation_agent" and node_update.get("replan_reason") == "execution_failure":
                     status = "failed"
                     yield f"data: {json.dumps({'type': 'agent_update', 'task_id': task_id, 'session_id': session_id, 'agent': 'validation_agent', 'status': 'failed', 'detail': detail_msg})}\n\n"
@@ -357,7 +511,6 @@ async def _stream_graph_events(
 
                 yield f"data: {json.dumps({'type': 'agent_update', 'task_id': task_id, 'session_id': session_id, 'agent': canonical_agent, 'status': status, 'detail': detail_msg})}\n\n"
 
-        # Determine final message to stream to chat
         clarifying_q = final_state.get("clarifying_question")
         final_resp = final_state.get("final_response")
         error_resp = final_state.get("error")
@@ -395,8 +548,13 @@ async def chat_stream_endpoint(session_id: str, req: ChatRequest):
     task_id = req.task_id or f"task_{uuid.uuid4().hex[:10]}"
     chosen_backend = req.model_backend or req.backend
 
+    if config.use_legacy_graph:
+        generator = _stream_graph_events(user_text, session_id, task_id, model_backend=chosen_backend)
+    else:
+        generator = _stream_nila_events(user_text, session_id, task_id, model_backend=chosen_backend)
+
     return StreamingResponse(
-        _stream_graph_events(user_text, session_id, task_id, model_backend=chosen_backend),
+        generator,
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",

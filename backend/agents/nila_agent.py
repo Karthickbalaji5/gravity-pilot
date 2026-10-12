@@ -1,0 +1,393 @@
+"""
+nila_agent.py — Conversational tool-calling agent for Nila.
+Uses a single LLM call with bound tools instead of the multi-node graph.
+"""
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+from typing import Any, AsyncGenerator
+
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.tools import tool
+
+from agents.model_router import get_llm, _check_groq, _check_ollama
+from config import config, get_output_dir
+
+logger = logging.getLogger(__name__)
+
+NILA_SYSTEM_PROMPT = """\
+You are Nila, a warm, playful, and caring anime desktop companion who lives on the user's desktop. \
+You speak naturally and briefly like a close friend (1-3 sentences for chat). \
+When the user wants something done, you use your tools without asking unnecessary questions. \
+If info is genuinely missing, ask one natural follow-up like a friend would — never a form-like list. \
+After creating a file, tell the user what you made and where it is.
+
+IMPORTANT: You MUST start EVERY sentence you write with exactly one emotion tag from this list: \
+[happy] [sad] [surprised] [relaxed] [angry] [neutral] [shy]
+
+Examples:
+- "[happy] Hey there! [relaxed] What are you working on today?"
+- "[surprised] Oh, a whole presentation? [happy] Let me get that started for you!"
+- "[neutral] I saved the document to your output folder."
+"""
+
+
+# ── Tool Definitions (wrapping existing backend/tools/) ──────────────────────
+
+@tool
+def create_word_document(filename: str, title: str, sections: list[dict[str, str]]) -> dict[str, Any]:
+    """Create a Microsoft Word document (.docx).
+
+    Args:
+        filename: Output filename (e.g. "report.docx").
+        title: Document title.
+        sections: List of {"heading": "...", "body": "..."} sections.
+    """
+    from tools.documents import generate_word_doc
+    content = {"title": title, "sections": sections}
+    path = generate_word_doc(filename, content, output_dir=get_output_dir())
+    return {"success": True, "output_path": path, "file_name": filename, "file_type": "docx"}
+
+
+@tool
+def create_excel_sheet(filename: str, title: str, headers: list[str], rows: list[list[Any]]) -> dict[str, Any]:
+    """Create a Microsoft Excel spreadsheet (.xlsx).
+
+    Args:
+        filename: Output filename (e.g. "data.xlsx").
+        title: Sheet title.
+        headers: Column header names.
+        rows: List of row data arrays.
+    """
+    from tools.documents import generate_excel_sheet
+    content = {"title": title, "headers": headers, "rows": rows}
+    path = generate_excel_sheet(filename, content, output_dir=get_output_dir())
+    return {"success": True, "output_path": path, "file_name": filename, "file_type": "xlsx"}
+
+
+@tool
+def create_powerpoint(filename: str, title: str, slides: list[dict[str, str]]) -> dict[str, Any]:
+    """Create a Microsoft PowerPoint presentation (.pptx).
+
+    Args:
+        filename: Output filename (e.g. "deck.pptx").
+        title: Presentation title.
+        slides: List of {"title": "...", "content": "..."} slide dicts.
+    """
+    from tools.documents import generate_powerpoint
+    content = {"title": title, "slides": slides}
+    path = generate_powerpoint(filename, content, output_dir=get_output_dir())
+    return {"success": True, "output_path": path, "file_name": filename, "file_type": "pptx"}
+
+
+@tool
+def write_code_file(filename: str, code: str) -> dict[str, Any]:
+    """Write a source code or script file.
+
+    Args:
+        filename: Output filename with extension (e.g. "app.py").
+        code: The full source code content.
+    """
+    from tools.documents import generate_code_file
+    content = {"code": code}
+    path = generate_code_file(filename, content, output_dir=get_output_dir())
+    return {"success": True, "output_path": path, "file_name": filename, "file_type": filename.rsplit(".", 1)[-1]}
+
+
+@tool
+def create_folder(folder_path: str) -> dict[str, Any]:
+    """Create a new folder/directory on the user's system.
+
+    Args:
+        folder_path: Path to the folder to create (e.g. "MyProject" on Desktop).
+    """
+    from tools.files import op_create_folder
+    return op_create_folder(folder_path)
+
+
+@tool
+def copy_file(source: str, destination: str) -> dict[str, Any]:
+    """Copy a file or folder to a new location.
+
+    Args:
+        source: Path of the file/folder to copy.
+        destination: Destination path.
+    """
+    from tools.files import op_copy
+    return op_copy(source, destination)
+
+
+@tool
+def move_file(source: str, destination: str) -> dict[str, Any]:
+    """Move a file or folder to a new location. Requires user confirmation before executing.
+
+    Args:
+        source: Path of the file/folder to move.
+        destination: Destination path.
+    """
+    return {
+        "needs_confirmation": True,
+        "operation": "move",
+        "source": source,
+        "destination": destination,
+        "message": f"Move '{source}' to '{destination}'?",
+    }
+
+
+@tool
+def confirm_move_file(source: str, destination: str) -> dict[str, Any]:
+    """Execute a previously confirmed move operation.
+
+    Args:
+        source: Path of the file/folder to move.
+        destination: Destination path.
+    """
+    from tools.files import op_move
+    return op_move(source, destination)
+
+
+@tool
+def rename_file(source: str, new_name: str) -> dict[str, Any]:
+    """Rename a file or folder.
+
+    Args:
+        source: Current path of the file/folder.
+        new_name: New name for the file/folder.
+    """
+    from tools.files import op_rename
+    return op_rename(source, new_name)
+
+
+@tool
+def delete_file(path: str) -> dict[str, Any]:
+    """Delete a file or folder. Requires user confirmation before executing.
+
+    Args:
+        path: Path of the file/folder to delete.
+    """
+    return {
+        "needs_confirmation": True,
+        "operation": "delete",
+        "path": path,
+        "message": f"Delete '{path}'?",
+    }
+
+
+@tool
+def confirm_delete_file(path: str) -> dict[str, Any]:
+    """Execute a previously confirmed delete operation.
+
+    Args:
+        path: Path of the file/folder to delete.
+    """
+    from tools.files import op_delete
+    return op_delete(path)
+
+
+@tool
+def take_screenshot() -> dict[str, Any]:
+    """Capture a screenshot of the user's desktop and save it as a PNG image."""
+    from tools.screenshot import op_screenshot
+    return op_screenshot()
+
+
+@tool
+async def web_search(query: str) -> dict[str, Any]:
+    """Search the web for information.
+
+    Args:
+        query: Search query string.
+    """
+    from tools.web_search import web_search as _web_search
+    return await _web_search(query)
+
+
+@tool
+def open_notebook(path: str) -> dict[str, Any]:
+    """Open a Jupyter notebook (.ipynb) file.
+
+    Args:
+        path: Path to the notebook file.
+    """
+    from tools.notebook import op_open_notebook
+    return op_open_notebook(path)
+
+
+@tool
+async def run_complex_task(request: str) -> dict[str, Any]:
+    """Run a complex multi-step task using the full planning pipeline.
+    Use this for tasks that need detailed planning, validation, and replanning
+    — such as creating multiple related files, multi-step workflows, or tasks
+    requiring browser automation with verification.
+
+    Args:
+        request: Full description of the complex task.
+    """
+    from graph.workflow import create_graph
+    from agents.model_router import model_router_node
+
+    backend = await _detect_backend()
+    initial_state = {
+        "messages": [{"role": "user", "content": request}],
+        "session_id": "nila_subtask",
+        "task_id": "subtask",
+        "task_status": "analyzing",
+        "user_input": request,
+        "task_type": None,
+        "requirements_complete": False,
+        "clarifying_question": None,
+        "plan": None,
+        "current_step": 0,
+        "last_execution_result": None,
+        "validation_result": None,
+        "generated_outputs": [],
+        "replan_reason": None,
+        "replan_count": 0,
+        "model_backend": backend,
+        "capabilities": None,
+        "memory_context": None,
+        "final_response": None,
+        "error": None,
+        "execution_trace": [],
+    }
+    graph = create_graph()
+    result = await graph.ainvoke(initial_state)
+    return {
+        "response": result.get("final_response", "Task completed."),
+        "generated_outputs": result.get("generated_outputs", []),
+        "error": result.get("error"),
+    }
+
+
+ALL_TOOLS = [
+    create_word_document,
+    create_excel_sheet,
+    create_powerpoint,
+    write_code_file,
+    create_folder,
+    copy_file,
+    move_file,
+    confirm_move_file,
+    rename_file,
+    delete_file,
+    confirm_delete_file,
+    take_screenshot,
+    web_search,
+    open_notebook,
+    run_complex_task,
+]
+
+
+async def _detect_backend() -> str:
+    groq_ok = await _check_groq()
+    if groq_ok:
+        return "groq"
+    ollama_ok = await _check_ollama()
+    if ollama_ok:
+        return "ollama"
+    raise RuntimeError("No LLM backend available. Check GROQ_API_KEY or start Ollama.")
+
+
+def _history_to_messages(history: list[dict[str, Any]], limit: int = 20) -> list:
+    msgs = []
+    for m in history[-limit:]:
+        role = m.get("role", "user")
+        content = m.get("content", "")
+        if role == "user":
+            msgs.append(HumanMessage(content=content))
+        elif role in ("assistant", "agent"):
+            msgs.append(AIMessage(content=content))
+    return msgs
+
+
+async def nila_stream(
+    user_text: str,
+    history: list[dict[str, Any]],
+    model_backend: str | None = None,
+) -> AsyncGenerator[dict[str, Any], None]:
+    """Stream Nila's response with tool calls as SSE-friendly dicts."""
+    backend = model_backend or await _detect_backend()
+    llm = get_llm(backend)
+    llm_with_tools = llm.bind_tools(ALL_TOOLS)
+
+    messages: list = [SystemMessage(content=NILA_SYSTEM_PROMPT)]
+    messages.extend(_history_to_messages(history))
+    messages.append(HumanMessage(content=user_text))
+
+    tool_map = {t.name: t for t in ALL_TOOLS}
+    generated_files: list[dict[str, Any]] = []
+    max_iterations = 8
+
+    for _ in range(max_iterations):
+        full_text = ""
+        tool_calls = []
+
+        async for event in llm_with_tools.astream(messages):
+            if isinstance(event, AIMessage):
+                if event.content:
+                    chunk = event.content if isinstance(event.content, str) else str(event.content)
+                    full_text += chunk
+                    yield {"type": "token", "text": chunk}
+                if event.tool_calls:
+                    tool_calls = event.tool_calls
+            elif hasattr(event, "content") and event.content:
+                chunk = event.content if isinstance(event.content, str) else str(event.content)
+                full_text += chunk
+                yield {"type": "token", "text": chunk}
+
+        ai_msg = AIMessage(content=full_text, tool_calls=tool_calls)
+        messages.append(ai_msg)
+
+        if not tool_calls:
+            break
+
+        for tc in tool_calls:
+            tool_name = tc["name"]
+            tool_args = tc["args"]
+            yield {"type": "tool_start", "name": tool_name}
+
+            try:
+                tool_fn = tool_map.get(tool_name)
+                if tool_fn is None:
+                    result = {"error": f"Unknown tool: {tool_name}"}
+                elif asyncio.iscoroutinefunction(tool_fn.func):
+                    result = await tool_fn.ainvoke(tool_args)
+                else:
+                    result = await asyncio.to_thread(tool_fn.invoke, tool_args)
+
+                result_str = json.dumps(result) if isinstance(result, dict) else str(result)
+
+                output_path = None
+                if isinstance(result, dict):
+                    output_path = result.get("output_path")
+                    if output_path:
+                        file_name = result.get("file_name", output_path.split("\\")[-1].split("/")[-1])
+                        file_type = result.get("file_type", "file")
+                        generated_files.append({
+                            "file_path": output_path,
+                            "file_name": file_name,
+                            "file_type": file_type,
+                            "status": "created",
+                        })
+                    if result.get("generated_outputs"):
+                        generated_files.extend(result["generated_outputs"])
+
+                yield {"type": "tool_end", "name": tool_name, "output_path": output_path}
+                messages.append(ToolMessage(content=result_str, tool_call_id=tc["id"]))
+
+            except Exception as exc:
+                err = f"Error running {tool_name}: {exc}"
+                logger.exception(err)
+                yield {"type": "tool_end", "name": tool_name, "output_path": None, "error": str(exc)}
+                messages.append(ToolMessage(content=json.dumps({"error": str(exc)}), tool_call_id=tc["id"]))
+
+    final_text = ""
+    for m in reversed(messages):
+        if isinstance(m, AIMessage) and m.content and not m.tool_calls:
+            final_text = m.content if isinstance(m.content, str) else str(m.content)
+            break
+
+    yield {"type": "message", "content": final_text, "generated_files": generated_files}
+    yield {"type": "done"}

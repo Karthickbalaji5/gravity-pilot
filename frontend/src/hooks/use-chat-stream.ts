@@ -1,5 +1,6 @@
 import { useState, useCallback, useRef } from "react";
 import { C } from "../theme";
+import type { CompanionTaskState } from "../types/nila";
 
 export type AgentId =
   | "model_router"
@@ -66,9 +67,12 @@ export function useChatStream(mode: string) {
   const [streamingMessages, setStreamingMessages] = useState<ChatMessage[]>([]);
   const [isStreaming, setIsStreaming] = useState(false);
   const [retryActive, setRetryActive] = useState(false);
+  const [taskState, setTaskState] = useState<CompanionTaskState>("IDLE");
   const abortControllerRef = useRef<AbortController | null>(null);
+  const activeTaskIdRef = useRef<string | null>(null);
 
   const abortCurrentStream = useCallback(() => {
+    activeTaskIdRef.current = null;
     if (abortControllerRef.current) {
       abortControllerRef.current.abort();
       abortControllerRef.current = null;
@@ -77,6 +81,7 @@ export function useChatStream(mode: string) {
     setStreamingMessages([]);
     setAgents(buildAgents(mode));
     setRetryActive(false);
+    setTaskState("CANCELLED");
   }, [mode]);
 
   const send = useCallback(
@@ -90,12 +95,15 @@ export function useChatStream(mode: string) {
       const controller = new AbortController();
       abortControllerRef.current = controller;
 
+      const assignedTaskId = targetTaskId || `task_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+      activeTaskIdRef.current = assignedTaskId;
+
       setIsStreaming(true);
       setStreamingMessages([]);
       setAgents(buildAgents(mode));
       setRetryActive(false);
-
-      const assignedTaskId = targetTaskId || `task_${Date.now()}`;
+      // Immediately set THINKING when planning begins
+      setTaskState("THINKING");
 
       try {
         const response = await fetch(`/api/chat/sessions/${targetSessionId}/stream`, {
@@ -117,6 +125,12 @@ export function useChatStream(mode: string) {
           const { done, value } = await reader.read();
           if (done) break;
 
+          // Drop events if this task has been superseded or cancelled
+          if (activeTaskIdRef.current !== assignedTaskId) {
+            reader.cancel();
+            return;
+          }
+
           buffer += decoder.decode(value, { stream: true });
           const parts = buffer.split("\n\n");
           buffer = parts.pop() || "";
@@ -129,11 +143,54 @@ export function useChatStream(mode: string) {
               try {
                 const data = JSON.parse(dataStr);
 
-                // Stream isolation: Verify event belongs to this session and task
+                // Stream isolation: Verify event belongs to this session and current active task
                 if (data.session_id && data.session_id !== targetSessionId) continue;
-                if (data.task_id && assignedTaskId && data.task_id !== assignedTaskId) continue;
+                if (data.task_id && data.task_id !== assignedTaskId) continue;
+                if (activeTaskIdRef.current !== assignedTaskId) continue;
 
-                if (data.type === "agent_update") {
+                if (data.type === "token") {
+                  // Live token streaming from Nila agent
+                  setStreamingMessages((prev) => {
+                    const liveId = `live_${assignedTaskId}`;
+                    const existing = prev.find((m) => m.id === liveId);
+                    if (existing) {
+                      return prev.map((m) =>
+                        m.id === liveId
+                          ? { ...m, text: m.text + (data.text || "") }
+                          : m
+                      );
+                    }
+                    return [
+                      ...prev,
+                      {
+                        id: liveId,
+                        sessionId: targetSessionId,
+                        taskId: assignedTaskId,
+                        role: "agent",
+                        agentName: "Nila",
+                        agentColor: C.teal,
+                        kind: "normal",
+                        text: data.text || "",
+                        createdAt: new Date().toISOString(),
+                      },
+                    ];
+                  });
+                  setTaskState("EXECUTING");
+                } else if (data.type === "tool_start") {
+                  setTaskState("EXECUTING");
+                } else if (data.type === "tool_end") {
+                  // tool finished, stay in EXECUTING
+                } else if (data.type === "task_start") {
+                  setTaskState("THINKING");
+                } else if (data.type === "task_state") {
+                  if (data.status === "waiting_for_user") {
+                    setTaskState("NEEDS_INPUT");
+                  } else if (data.status === "completed") {
+                    setTaskState("COMPLETED");
+                  } else if (data.status === "failed") {
+                    setTaskState("FAILED");
+                  }
+                } else if (data.type === "agent_update") {
                   setAgents((prev) =>
                     prev.map((a) =>
                       a.id === data.agent
@@ -142,8 +199,17 @@ export function useChatStream(mode: string) {
                     )
                   );
 
+                  if (["document_agent", "desktop_agent", "browser_agent"].includes(data.agent)) {
+                    setTaskState("EXECUTING");
+                  } else if (data.agent === "validation_agent") {
+                    setTaskState("VALIDATING");
+                  } else if (["requirement_analyzer", "planning_agent", "model_router", "task_coordinator"].includes(data.agent)) {
+                    setTaskState("THINKING");
+                  }
+
                   if (data.agent === "planning_agent" && data.status === "retrying") {
                     setRetryActive(true);
+                    setTaskState("THINKING");
                   } else if (
                     data.agent === "planning_agent" &&
                     (data.status === "active" || data.status === "idle")
@@ -151,6 +217,12 @@ export function useChatStream(mode: string) {
                     setRetryActive(false);
                   }
                 } else if (data.type === "message") {
+                  if (data.kind === "clarification") {
+                    setTaskState("NEEDS_INPUT");
+                  } else if (data.kind === "error") {
+                    setTaskState("FAILED");
+                  }
+
                   const generatedFiles: GeneratedFile[] = (data.generated_files || []).map((f: any) => ({
                     taskId: f.task_id,
                     sessionId: f.session_id,
@@ -160,24 +232,28 @@ export function useChatStream(mode: string) {
                     status: f.status,
                   }));
 
-                  setStreamingMessages((prev) => [
-                    ...prev,
-                    {
-                      id: Date.now().toString() + Math.random().toString(),
-                      sessionId: targetSessionId,
-                      taskId: assignedTaskId,
-                      role: "agent",
-                      agentName: data.agentName,
-                      agentColor: data.agentColor,
-                      kind: data.kind || "normal",
-                      text: data.text,
-                      items: data.items,
-                      generatedFiles,
-                      createdAt: new Date().toISOString(),
-                    },
-                  ]);
+                  const liveId = `live_${assignedTaskId}`;
+                  setStreamingMessages((prev) => {
+                    const withoutLive = prev.filter((m) => m.id !== liveId);
+                    return [
+                      ...withoutLive,
+                      {
+                        id: Date.now().toString() + Math.random().toString(),
+                        sessionId: targetSessionId,
+                        taskId: assignedTaskId,
+                        role: "agent",
+                        agentName: data.agentName,
+                        agentColor: data.agentColor,
+                        kind: data.kind || "normal",
+                        text: data.text,
+                        items: data.items,
+                        generatedFiles,
+                        createdAt: new Date().toISOString(),
+                      },
+                    ];
+                  });
                 } else if (data.type === "done") {
-                  // Stream complete for this task
+                  // Stream completed for this turn
                 }
               } catch (e) {
                 console.error("Failed to parse SSE payload:", e, dataStr);
@@ -186,11 +262,13 @@ export function useChatStream(mode: string) {
           }
         }
       } catch (err: any) {
-        if (err.name === "AbortError") {
-          // Stream deliberately cancelled by user (e.g. New Chat)
+        if (err.name === "AbortError" || activeTaskIdRef.current !== assignedTaskId) {
+          // Stream deliberately cancelled by user (e.g. New Chat / Reset)
+          setTaskState("CANCELLED");
           return;
         }
         console.error("Stream connection error:", err);
+        setTaskState("FAILED");
         setStreamingMessages((prev) => [
           ...prev,
           {
@@ -220,6 +298,8 @@ export function useChatStream(mode: string) {
     streamingMessages,
     setStreamingMessages,
     isStreaming,
+    taskState,
+    setTaskState,
     send,
     retryActive,
     abortCurrentStream,
