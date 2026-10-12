@@ -124,12 +124,13 @@ python scripts\wait_for_services.py
 
 echo.
 echo ========================================================
-echo   GRAVITYPILOT AI IS RUNNING
+echo   GRAVITYPILOT AI + NILA 3D COMPANION IS RUNNING
 echo ========================================================
 echo.
-echo   Web UI:     http://localhost:5173
-echo   API Docs:   http://localhost:8000/docs
-echo   API Health: http://localhost:8000/health
+echo   Web UI:        http://localhost:5173
+echo   Desktop App:   START_DESKTOP.bat (or press [D] below)
+echo   API Docs:      http://localhost:8000/docs
+echo   API Health:    http://localhost:8000/health
 echo.
 echo   Backend and Frontend are running in dedicated windows.
 echo   To stop all services cleanly, run STOP.bat or press [Q].
@@ -138,10 +139,15 @@ echo.
 
 :monitor_loop
 set "USER_CMD="
-set /p USER_CMD="Press [Q] then Enter to stop all services (or [R] to reopen browser): "
+set /p USER_CMD="[Q] Quit | [R] Reopen Web UI | [D] Launch Desktop Companion: "
 if /i "%USER_CMD%"=="Q" goto shutdown
 if /i "%USER_CMD%"=="R" (
     start http://localhost:5173
+    goto monitor_loop
+)
+if /i "%USER_CMD%"=="D" (
+    echo [INFO] Launching Nila 3D Desktop Companion...
+    start "" cmd /c "cd frontend && npm run desktop"
     goto monitor_loop
 )
 goto monitor_loop

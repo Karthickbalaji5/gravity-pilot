@@ -1,6 +1,8 @@
 import { useState, useCallback, useRef } from "react";
 import { C } from "../theme";
-import type { CompanionTaskState } from "../types/nila";
+import type { CompanionTaskState, EmotionType } from "../types/nila";
+import { parseEmotions, emotionToGesture } from "../services/emotionParser";
+import type { AnimationState } from "../types/nila";
 
 export type AgentId =
   | "model_router"
@@ -62,7 +64,13 @@ export function buildAgents(mode: string): Agent[] {
   ];
 }
 
-export function useChatStream(mode: string) {
+export function useChatStream(
+  mode: string,
+  callbacks?: {
+    onEmotion?: (e: EmotionType) => void;
+    onGesture?: (g: AnimationState) => void;
+  }
+) {
   const [agents, setAgents] = useState<Agent[]>(() => buildAgents(mode));
   const [streamingMessages, setStreamingMessages] = useState<ChatMessage[]>([]);
   const [isStreaming, setIsStreaming] = useState(false);
@@ -149,32 +157,44 @@ export function useChatStream(mode: string) {
                 if (activeTaskIdRef.current !== assignedTaskId) continue;
 
                 if (data.type === "token") {
-                  // Live token streaming from Nila agent
-                  setStreamingMessages((prev) => {
-                    const liveId = `live_${assignedTaskId}`;
-                    const existing = prev.find((m) => m.id === liveId);
-                    if (existing) {
-                      return prev.map((m) =>
-                        m.id === liveId
-                          ? { ...m, text: m.text + (data.text || "") }
-                          : m
-                      );
+                  const rawToken = data.text || "";
+                  const { cleanText, emotions } = parseEmotions(rawToken);
+
+                  for (const emotion of emotions) {
+                    callbacks?.onEmotion?.(emotion);
+                    const gesture = emotionToGesture(emotion);
+                    if (gesture) {
+                      callbacks?.onGesture?.(gesture as AnimationState);
                     }
-                    return [
-                      ...prev,
-                      {
-                        id: liveId,
-                        sessionId: targetSessionId,
-                        taskId: assignedTaskId,
-                        role: "agent",
-                        agentName: "Nila",
-                        agentColor: C.teal,
-                        kind: "normal",
-                        text: data.text || "",
-                        createdAt: new Date().toISOString(),
-                      },
-                    ];
-                  });
+                  }
+
+                  if (cleanText) {
+                    setStreamingMessages((prev) => {
+                      const liveId = `live_${assignedTaskId}`;
+                      const existing = prev.find((m) => m.id === liveId);
+                      if (existing) {
+                        return prev.map((m) =>
+                          m.id === liveId
+                            ? { ...m, text: m.text + cleanText }
+                            : m
+                        );
+                      }
+                      return [
+                        ...prev,
+                        {
+                          id: liveId,
+                          sessionId: targetSessionId,
+                          taskId: assignedTaskId,
+                          role: "agent",
+                          agentName: "Nila",
+                          agentColor: C.teal,
+                          kind: "normal",
+                          text: cleanText,
+                          createdAt: new Date().toISOString(),
+                        },
+                      ];
+                    });
+                  }
                   setTaskState("EXECUTING");
                 } else if (data.type === "tool_start") {
                   setTaskState("EXECUTING");
@@ -233,6 +253,7 @@ export function useChatStream(mode: string) {
                   }));
 
                   const liveId = `live_${assignedTaskId}`;
+                  const { cleanText: msgClean } = parseEmotions(data.text || "");
                   setStreamingMessages((prev) => {
                     const withoutLive = prev.filter((m) => m.id !== liveId);
                     return [
@@ -245,7 +266,7 @@ export function useChatStream(mode: string) {
                         agentName: data.agentName,
                         agentColor: data.agentColor,
                         kind: data.kind || "normal",
-                        text: data.text,
+                        text: msgClean,
                         items: data.items,
                         generatedFiles,
                         createdAt: new Date().toISOString(),

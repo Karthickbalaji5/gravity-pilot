@@ -24,6 +24,7 @@ for /f "tokens=5" %%a in ('netstat -aon ^| findstr ":5173" ^| findstr "LISTENING
 :: Close any residual cmd windows with GravityPilot titles
 taskkill /F /FI "WINDOWTITLE eq GravityPilot Backend*" >nul 2>&1
 taskkill /F /FI "WINDOWTITLE eq GravityPilot Frontend*" >nul 2>&1
+taskkill /F /IM electron.exe >nul 2>&1
 
 if "%KILLED%"=="1" (
     echo [SUCCESS] GravityPilot services stopped cleanly.

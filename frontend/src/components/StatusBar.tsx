@@ -1,5 +1,6 @@
 import React from "react";
 import { C } from "../theme";
+import type { CompanionWindowMode } from "../types/nila";
 
 export interface OllamaInfo {
   available: boolean;
@@ -15,6 +16,8 @@ interface StatusBarProps {
   isBackendOnline: boolean;
   ollamaInfo?: OllamaInfo | null;
   groqAvailable?: boolean;
+  windowMode?: CompanionWindowMode;
+  onWindowModeChange?: (m: CompanionWindowMode) => void;
 }
 
 export function StatusBar({
@@ -23,6 +26,8 @@ export function StatusBar({
   isBackendOnline,
   ollamaInfo,
   groqAvailable = true,
+  windowMode = "split",
+  onWindowModeChange,
 }: StatusBarProps) {
   const isOllamaConnected = !!ollamaInfo?.available;
   const ollamaModelName = ollamaInfo?.active_model || "llama3:latest";
@@ -186,7 +191,46 @@ export function StatusBar({
             </button>
           ))}
         </div>
+
+        {/* Layout Mode Switcher */}
+        {onWindowModeChange && (
+          <div
+            style={{
+              display: "flex",
+              borderRadius: 6,
+              overflow: "hidden",
+              border: `1px solid ${C.border}`,
+              fontSize: 12,
+            }}
+          >
+            {[
+              { id: "dashboard" as const, label: "📊 Dashboard" },
+              { id: "split" as const, label: "🌓 Split" },
+              { id: "companion" as const, label: "🧚 Companion" },
+            ].map((lm) => (
+              <button
+                key={lm.id}
+                onClick={() => onWindowModeChange(lm.id)}
+                title={`Switch to ${lm.label} mode`}
+                style={{
+                  padding: "5px 10px",
+                  border: "none",
+                  cursor: "pointer",
+                  fontFamily: "var(--dp-font-ui)",
+                  fontSize: 11,
+                  fontWeight: windowMode === lm.id ? 600 : 400,
+                  background: windowMode === lm.id ? "#6366F1" : `${C.navy}88`,
+                  color: "white",
+                  transition: "all 0.15s ease",
+                }}
+              >
+                {lm.label}
+              </button>
+            ))}
+          </div>
+        )}
       </div>
+
     </div>
   );
 }

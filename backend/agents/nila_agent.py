@@ -17,12 +17,20 @@ from config import config, get_output_dir
 
 logger = logging.getLogger(__name__)
 
-NILA_SYSTEM_PROMPT = """\
+NILA_SYSTEM_PROMPT_BASE = """\
 You are Nila, a warm, playful, and caring anime desktop companion who lives on the user's desktop. \
 You speak naturally and briefly like a close friend (1-3 sentences for chat). \
 When the user wants something done, you use your tools without asking unnecessary questions. \
 If info is genuinely missing, ask one natural follow-up like a friend would — never a form-like list. \
 After creating a file, tell the user what you made and where it is.
+
+You can see the user's screen! When they say "look at this", "what's on my screen", "what's this error", \
+"can you see this", or similar, use your look_at_screen tool to take a screenshot and analyze it. \
+You can also analyze existing image files with analyze_image.
+
+When the user shares personal details (their name, projects they're working on, preferences, etc.), \
+quietly remember them using remember_fact. Don't announce that you're saving things — just naturally \
+incorporate what you know. You can forget facts too if asked.
 
 IMPORTANT: You MUST start EVERY sentence you write with exactly one emotion tag from this list: \
 [happy] [sad] [surprised] [relaxed] [angry] [neutral] [shy]
@@ -32,6 +40,14 @@ Examples:
 - "[surprised] Oh, a whole presentation? [happy] Let me get that started for you!"
 - "[neutral] I saved the document to your output folder."
 """
+
+
+def _build_system_prompt(facts: list[dict]) -> str:
+    prompt = NILA_SYSTEM_PROMPT_BASE
+    if facts:
+        fact_lines = "\n".join(f"- {f['fact']}" for f in facts)
+        prompt += f"\n\nThings you know about the user:\n{fact_lines}\n"
+    return prompt
 
 
 # ── Tool Definitions (wrapping existing backend/tools/) ──────────────────────
@@ -216,6 +232,135 @@ def open_notebook(path: str) -> dict[str, Any]:
 
 
 @tool
+async def look_at_screen(question: str) -> dict[str, Any]:
+    """Take a screenshot of the user's desktop and answer a question about what's visible.
+    Use when the user says "look at this", "what's on my screen", "what's this error", etc.
+
+    Args:
+        question: What to look for or describe about the screen.
+    """
+    return await _vision_query(question, screenshot=True)
+
+
+@tool
+async def analyze_image(path: str, question: str) -> dict[str, Any]:
+    """Analyze an existing image file and answer a question about it.
+
+    Args:
+        path: Path to the image file.
+        question: What to look for or describe about the image.
+    """
+    return await _vision_query(question, image_path=path)
+
+
+async def _vision_query(question: str, screenshot: bool = False, image_path: str | None = None) -> dict[str, Any]:
+    """Send an image + question to a vision model (Groq or Ollama)."""
+    import base64
+    from PIL import Image
+    import io
+
+    if screenshot:
+        from tools.screenshot import op_screenshot
+        result = op_screenshot()
+        image_path = result.get("output_path")
+        if not image_path:
+            return {"error": "Screenshot failed", "detail": str(result)}
+
+    if not image_path:
+        return {"error": "No image path provided"}
+
+    from pathlib import Path as _Path
+    img_path = _Path(image_path)
+    if not img_path.exists():
+        return {"error": f"Image not found: {image_path}"}
+
+    img = Image.open(img_path)
+    if img.width > 1280:
+        ratio = 1280 / img.width
+        img = img.resize((1280, int(img.height * ratio)), Image.LANCZOS)
+
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    b64 = base64.b64encode(buf.getvalue()).decode()
+
+    backend = await _detect_backend()
+
+    if backend == "groq":
+        import httpx
+        resp = await httpx.AsyncClient(timeout=30).post(
+            "https://api.groq.com/openai/v1/chat/completions",
+            headers={"Authorization": f"Bearer {config.groq_api_key}", "Content-Type": "application/json"},
+            json={
+                "model": config.groq_vision_model,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": question},
+                            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}},
+                        ],
+                    }
+                ],
+                "max_tokens": 1024,
+            },
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            answer = data["choices"][0]["message"]["content"]
+            return {"answer": answer, "image_path": image_path}
+        return {"error": f"Groq vision API error: {resp.status_code}", "detail": resp.text}
+
+    elif backend == "ollama":
+        import httpx
+        base_url = config.ollama_base_url.rstrip("/")
+        resp = await httpx.AsyncClient(timeout=60).post(
+            f"{base_url}/api/chat",
+            json={
+                "model": config.ollama_vision_model,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": question,
+                        "images": [b64],
+                    }
+                ],
+                "stream": False,
+            },
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            answer = data.get("message", {}).get("content", "")
+            return {"answer": answer, "image_path": image_path}
+        return {"error": f"Ollama vision error: {resp.status_code}", "detail": resp.text}
+
+    return {"error": "No vision-capable backend available"}
+
+
+@tool
+async def remember_fact(fact: str) -> dict[str, Any]:
+    """Remember a fact about the user for future conversations.
+    Use this silently when the user shares personal details like their name,
+    projects, preferences, or anything worth remembering.
+
+    Args:
+        fact: The fact to remember (e.g. "User's name is Karthick", "User prefers dark mode").
+    """
+    from memory.database import add_fact
+    return await add_fact(fact)
+
+
+@tool
+async def forget_fact(fact: str) -> dict[str, Any]:
+    """Forget a previously remembered fact about the user.
+
+    Args:
+        fact: Text matching the fact to forget.
+    """
+    from memory.database import remove_fact
+    return await remove_fact(fact)
+
+
+@tool
 async def run_complex_task(request: str) -> dict[str, Any]:
     """Run a complex multi-step task using the full planning pipeline.
     Use this for tasks that need detailed planning, validation, and replanning
@@ -276,6 +421,10 @@ ALL_TOOLS = [
     take_screenshot,
     web_search,
     open_notebook,
+    look_at_screen,
+    analyze_image,
+    remember_fact,
+    forget_fact,
     run_complex_task,
 ]
 
@@ -308,11 +457,16 @@ async def nila_stream(
     model_backend: str | None = None,
 ) -> AsyncGenerator[dict[str, Any], None]:
     """Stream Nila's response with tool calls as SSE-friendly dicts."""
+    from memory.database import get_all_facts
+
     backend = model_backend or await _detect_backend()
     llm = get_llm(backend)
     llm_with_tools = llm.bind_tools(ALL_TOOLS)
 
-    messages: list = [SystemMessage(content=NILA_SYSTEM_PROMPT)]
+    facts = await get_all_facts()
+    system_prompt = _build_system_prompt(facts)
+
+    messages: list = [SystemMessage(content=system_prompt)]
     messages.extend(_history_to_messages(history))
     messages.append(HumanMessage(content=user_text))
 

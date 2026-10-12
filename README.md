@@ -1,6 +1,11 @@
-# DesktopPilot AI (GravityPilot)
+# Gravity-Pilot AI — Unified Multi-Agent Platform with Nila 3D Companion
 
-**DesktopPilot AI** is an intelligent, autonomous desktop automation assistant powered by a LangGraph multi-agent orchestration architecture. It supports dual-engine execution: fast cloud inference via **Groq** and completely private offline local execution via **Ollama (Llama 3)**.
+**Gravity-Pilot AI** is a production Windows desktop automation application featuring **Nila**, an animated 3D VRM 1.0 anime companion with real-time neural speech, audio-synchronized lip-sync, procedural breathing and blinking, and emotional morphs. The real work is performed by **Gravity-Pilot's LangGraph multi-agent architecture** combined with specialized **Agentic AI** tools.
+
+## Quick Launch Entry Points
+- **START_DESKTOP.bat**: Launches the unified Windows desktop application with floating 3D Nila companion.
+- **START.bat**: Interactive launcher for Desktop Companion or Web Browser UI (http://localhost:5173).
+- **STOP.bat**: Cleanly terminates all backend, frontend, and Electron processes. It supports dual-engine execution: fast cloud inference via **Groq** and completely private offline local execution via **Ollama (Llama 3)**.
 
 ---
 

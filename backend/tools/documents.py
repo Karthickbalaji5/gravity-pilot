@@ -56,6 +56,29 @@ def generate_word_doc(output_filename: str, content: dict[str, Any], output_dir:
     return str(out_path)
 
 
+def generate_attendance_sheet(
+    output_filename: str = "Attendance.xlsx",
+    student_count: int = 10,
+    students: list[str] | None = None,
+    output_dir: Path | str | None = None,
+) -> str:
+    """Generate a formatted attendance sheet (reused from Agentic AI Fleet)."""
+    headers = ["Roll No", "Student Name", "Status", "Date"]
+    default_names = [
+        "Aarav Sharma", "Aditi Rao", "Bhavya Patel", "Chetan Kumar", "Divya Nair",
+        "Eshaan Reddy", "Farhan Ali", "Gauri Joshi", "Harsh Vardhan", "Ishita Sen"
+    ]
+    names = students or default_names[:student_count] if student_count else default_names
+    from datetime import date
+    today = date.today().strftime("%Y-%m-%d")
+    rows = [[f"R{101 + i}", name, "Present", today] for i, name in enumerate(names)]
+    return generate_excel_sheet(
+        output_filename,
+        {"sheet_name": "Attendance", "headers": headers, "rows": rows},
+        output_dir=output_dir,
+    )
+
+
 def generate_excel_sheet(output_filename: str, content: dict[str, Any], output_dir: Path | str | None = None) -> str:
     """Generate a styled Microsoft Excel workbook (.xlsx)."""
     import openpyxl
@@ -64,10 +87,25 @@ def generate_excel_sheet(output_filename: str, content: dict[str, Any], output_d
 
     wb = openpyxl.Workbook()
     ws = wb.active
-    ws.title = content.get("sheet_name", "Sheet1")
+    sheet_title = content.get("sheet_name", "Sheet1")
+    ws.title = sheet_title
 
     headers = content.get("headers", [])
     rows = content.get("rows", [])
+
+    # If it's an attendance sheet request with missing headers or rows, provide intelligent defaults
+    is_attendance = "attendance" in output_filename.lower() or "attendance" in sheet_title.lower()
+    if is_attendance:
+        if not headers:
+            headers = ["Roll No", "Student Name", "Status", "Date"]
+        if not rows:
+            from datetime import date
+            today = date.today().strftime("%Y-%m-%d")
+            default_students = [
+                "Aarav Sharma", "Aditi Rao", "Bhavya Patel", "Chetan Kumar", "Divya Nair",
+                "Eshaan Reddy", "Farhan Ali", "Gauri Joshi", "Harsh Vardhan", "Ishita Sen"
+            ]
+            rows = [[f"R{101 + i}", name, "Present", today] for i, name in enumerate(default_students)]
 
     # Write headers
     if headers:
@@ -98,6 +136,7 @@ def generate_excel_sheet(output_filename: str, content: dict[str, Any], output_d
     wb.save(str(out_path))
     logger.info("Saved Excel spreadsheet: %s", out_path)
     return str(out_path)
+
 
 
 def generate_powerpoint(output_filename: str, content: dict[str, Any], output_dir: Path | str | None = None) -> str:

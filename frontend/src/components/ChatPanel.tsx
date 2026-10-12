@@ -84,28 +84,67 @@ function FileCard({ file }: { file: GeneratedFile }) {
         </div>
       </div>
 
-      <button
-        onClick={handleCopy}
-        title="Copy path to clipboard"
-        style={{
-          display: "flex",
-          alignItems: "center",
-          gap: 4,
-          background: "white",
-          border: `1px solid ${C.panelBorder}`,
-          borderRadius: 6,
-          padding: "4px 8px",
-          fontSize: 11,
-          fontFamily: "var(--dp-font-ui)",
-          color: copied ? "#2E7D6B" : C.textSec,
-          cursor: "pointer",
-          flexShrink: 0,
-          transition: "all 0.15s ease",
-        }}
-      >
-        {copied ? <Check size={12} /> : <Copy size={12} />}
-        {copied ? "Copied" : "Copy Path"}
-      </button>
+      <div style={{ display: "flex", alignItems: "center", gap: 6, flexShrink: 0 }}>
+        <button
+          onClick={handleCopy}
+          title="Copy path to clipboard"
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 4,
+            background: "white",
+            border: `1px solid ${C.panelBorder}`,
+            borderRadius: 6,
+            padding: "4px 8px",
+            fontSize: 11,
+            fontFamily: "var(--dp-font-ui)",
+            color: copied ? "#2E7D6B" : C.textSec,
+            cursor: "pointer",
+            flexShrink: 0,
+            transition: "all 0.15s ease",
+          }}
+        >
+          {copied ? <Check size={12} /> : <Copy size={12} />}
+          {copied ? "Copied" : "Copy Path"}
+        </button>
+
+        <button
+          onClick={async () => {
+            if ((window as any).electronAPI?.openFile) {
+              await (window as any).electronAPI.openFile(file.filePath);
+              return;
+            }
+            try {
+              await fetch("/api/open-file", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ file_path: file.filePath }),
+              });
+            } catch (err) {
+              console.error("Open file error:", err);
+            }
+          }}
+          title="Open in native desktop application"
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 4,
+            background: "#6366F1",
+            border: "none",
+            borderRadius: 6,
+            padding: "4px 8px",
+            fontSize: 11,
+            fontWeight: 600,
+            fontFamily: "var(--dp-font-ui)",
+            color: "white",
+            cursor: "pointer",
+            flexShrink: 0,
+            transition: "all 0.15s ease",
+          }}
+        >
+          Open
+        </button>
+      </div>
     </div>
   );
 }

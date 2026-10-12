@@ -45,18 +45,25 @@ for attempt in range(1, MAX_ATTEMPTS + 1):
 
     time.sleep(0.5)
 
-if backend_ready and frontend_ready:
-    print("\n[SUCCESS] GravityPilot AI is fully operational!")
-    print("[INFO] Launching browser to http://localhost:5173 ...")
-    webbrowser.open(FRONTEND_URL)
-    sys.exit(0)
-elif frontend_ready and not backend_ready:
-    print("\n[WARNING] Frontend is ready, but Backend took longer to respond.")
-    print("[INFO] Opening browser anyway. It may take a few more seconds for AI models to connect.")
-    webbrowser.open(FRONTEND_URL)
+is_desktop = "--desktop" in sys.argv
+
+if backend_ready:
+    print("\n[SUCCESS] GravityPilot + Nila AI is operational!")
+    if is_desktop:
+        print("[INFO] Launching Nila 3D Desktop Companion (Electron)...")
+        import subprocess
+        subprocess.Popen("npm run desktop", cwd="frontend", shell=True)
+    else:
+        print("[INFO] Launching browser to http://localhost:5173 ...")
+        webbrowser.open(FRONTEND_URL)
     sys.exit(0)
 else:
     print("\n[WARNING] Services took longer than expected to start.")
     print("Please check the minimized console windows on your taskbar for detailed logs.")
-    webbrowser.open(FRONTEND_URL)
+    if is_desktop:
+        import subprocess
+        subprocess.Popen("npm run desktop", cwd="frontend", shell=True)
+    else:
+        webbrowser.open(FRONTEND_URL)
     sys.exit(1)
+

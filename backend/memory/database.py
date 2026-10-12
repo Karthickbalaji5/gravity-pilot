@@ -76,6 +76,13 @@ class PreferenceRecord(Base):
     value = Column(Text, nullable=False)
 
 
+class UserFactRecord(Base):
+    __tablename__ = "user_facts"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    fact = Column(Text, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
 async def _migrate_sqlite_columns(conn):
     """Safely add any missing columns to existing SQLite tables."""
     def _do_migrate(connection):
@@ -423,3 +430,42 @@ async def get_all_sessions() -> list[dict[str, Any]]:
             }
             for r in rows
         ]
+
+
+# ── User Facts (long-term memory) ───────────────────────────────────────────
+
+async def get_all_facts() -> list[dict[str, Any]]:
+    async with await _get_session() as db:
+        result = await db.execute(
+            select(UserFactRecord).order_by(UserFactRecord.created_at)
+        )
+        rows = result.scalars().all()
+        return [{"id": r.id, "fact": r.fact, "created_at": r.created_at.isoformat() if r.created_at else None} for r in rows]
+
+
+async def add_fact(fact: str) -> dict[str, Any]:
+    async with await _get_session() as db:
+        existing = await db.execute(
+            select(UserFactRecord).where(UserFactRecord.fact == fact)
+        )
+        if existing.scalars().first():
+            return {"success": False, "message": "Fact already exists."}
+        record = UserFactRecord(fact=fact, created_at=datetime.utcnow())
+        db.add(record)
+        await db.commit()
+        await db.refresh(record)
+        return {"success": True, "id": record.id, "fact": record.fact}
+
+
+async def remove_fact(fact_text: str) -> dict[str, Any]:
+    async with await _get_session() as db:
+        result = await db.execute(
+            select(UserFactRecord).where(UserFactRecord.fact.ilike(f"%{fact_text}%"))
+        )
+        matches = result.scalars().all()
+        if not matches:
+            return {"success": False, "message": f"No fact matching '{fact_text}' found."}
+        for m in matches:
+            await db.delete(m)
+        await db.commit()
+        return {"success": True, "removed": len(matches)}

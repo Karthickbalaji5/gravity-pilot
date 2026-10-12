@@ -6,19 +6,57 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "electron": "electron ./electron/main.cjs",
+    "desktop": "electron ./electron/main.cjs",
+    "dist": "npm run build && electron-builder --win"
   },
   "dependencies": {
+    "@pixiv/three-vrm": "^3.5.5",
+    "@types/three": "^0.186.0",
     "clsx": "^2.1.1",
     "lucide-react": "^0.469.0",
     "react": "^18.3.1",
-    "react-dom": "^18.3.1"
+    "react-dom": "^18.3.1",
+    "three": "^0.186.1"
   },
   "devDependencies": {
     "@types/react": "^18.3.18",
     "@types/react-dom": "^18.3.5",
     "@vitejs/plugin-react": "^4.3.4",
+    "electron": "^44.7.0",
+    "electron-builder": "^26.0.12",
     "typescript": "^5.6.3",
     "vite": "^6.0.7"
+  },
+  "build": {
+    "appId": "com.gravitypilot.nila",
+    "productName": "Gravity-Pilot",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "electron/**/*",
+      "public/model.vrm",
+      "public/favicon.ico"
+    ],
+    "extraResources": [
+      {
+        "from": "../backend-dist",
+        "to": "backend",
+        "filter": ["**/*"]
+      }
+    ],
+    "win": {
+      "target": "nsis",
+      "icon": "public/favicon.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "installerIcon": "public/favicon.ico",
+      "uninstallerIcon": "public/favicon.ico"
+    }
   }
 }

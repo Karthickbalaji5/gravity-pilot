@@ -14,7 +14,7 @@ from pathlib import Path
 import uuid
 from typing import Any, AsyncGenerator, Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -270,6 +270,57 @@ async def tts_speech_endpoint(req: TTSRequest):
     except Exception as exc:
         logger.warning("Edge TTS synthesis fallback: %s", exc)
         raise HTTPException(status_code=500, detail=f"TTS error: {exc}")
+
+
+@app.post("/api/stt")
+async def stt_transcribe(audio: UploadFile = File(...)):
+    """Transcribe uploaded audio via Groq Whisper or local faster-whisper."""
+    import tempfile
+    audio_bytes = await audio.read()
+    if not audio_bytes:
+        raise HTTPException(status_code=400, detail="Empty audio file")
+
+    # Save to temp file
+    suffix = ".webm"
+    if audio.filename and "." in audio.filename:
+        suffix = "." + audio.filename.rsplit(".", 1)[-1]
+
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+        tmp.write(audio_bytes)
+        tmp_path = tmp.name
+
+    try:
+        # Try Groq Whisper first (cloud)
+        if config.groq_api_key.strip():
+            try:
+                from groq import Groq
+                client = Groq(api_key=config.groq_api_key)
+                with open(tmp_path, "rb") as f:
+                    transcription = client.audio.transcriptions.create(
+                        model="whisper-large-v3-turbo",
+                        file=f,
+                    )
+                return {"text": transcription.text}
+            except Exception as exc:
+                logger.warning("Groq Whisper failed, trying local: %s", exc)
+
+        # Fallback: faster-whisper (local)
+        try:
+            from faster_whisper import WhisperModel
+            model = WhisperModel("base.en", compute_type="int8")
+            segments, _info = model.transcribe(tmp_path)
+            text = " ".join(seg.text for seg in segments).strip()
+            return {"text": text}
+        except ImportError:
+            raise HTTPException(status_code=500, detail="No STT backend available. Install groq or faster-whisper.")
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"Local STT error: {exc}")
+    finally:
+        import os as _os
+        try:
+            _os.unlink(tmp_path)
+        except OSError:
+            pass
 
 
 @app.post("/api/tasks/{task_id}/cancel")
