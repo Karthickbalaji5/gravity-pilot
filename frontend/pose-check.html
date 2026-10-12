@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>VRM Pose Checker</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: system-ui; background: #1a1a2e; color: #eee; display: flex; flex-direction: column; height: 100vh; }
+  #controls { padding: 12px; display: flex; gap: 12px; align-items: center; background: #16213e; }
+  select, button { padding: 6px 12px; border-radius: 6px; border: 1px solid #444; background: #0f3460; color: #eee; font-size: 13px; cursor: pointer; }
+  button:hover { background: #533483; }
+  #info { padding: 8px 12px; font-size: 11px; background: #0f3460; color: #94a3b8; }
+  #canvas-wrap { flex: 1; position: relative; }
+  canvas { display: block; width: 100%; height: 100%; }
+</style>
+</head>
+<body>
+<div id="controls">
+  <label>Pose: <select id="pose-select"><option value="">-- rest --</option></select></label>
+  <button id="reset-btn">Reset to Rest</button>
+  <span id="pose-name" style="margin-left:auto; font-size:12px; color:#c084fc;"></span>
+</div>
+<div id="info">Loading VRM model...</div>
+<div id="canvas-wrap"></div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "/node_modules/three/build/three.module.js",
+    "three/examples/jsm/": "/node_modules/three/examples/jsm/",
+    "@pixiv/three-vrm": "/node_modules/@pixiv/three-vrm/lib/three-vrm.module.js"
+  }
+}
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
+import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
+import { VRM, VRMLoaderPlugin, VRMUtils } from '@pixiv/three-vrm';
+
+const wrap = document.getElementById('canvas-wrap');
+const info = document.getElementById('info');
+const sel = document.getElementById('pose-select');
+const nameSpan = document.getElementById('pose-name');
+
+// Scene setup
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(30, wrap.clientWidth / wrap.clientHeight, 0.1, 50);
+camera.position.set(0, 0.8, 3.5);
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+renderer.setSize(wrap.clientWidth, wrap.clientHeight);
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+wrap.appendChild(renderer.domElement);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.target.set(0, 0.8, 0);
+controls.update();
+
+scene.add(new THREE.AmbientLight(0xffffff, 1.2));
+const dir = new THREE.DirectionalLight(0xffffff, 1.4);
+dir.position.set(1.5, 2.5, 2);
+scene.add(dir);
+scene.add(new THREE.DirectionalLight(0xc7d2fe, 0.8).translateX(-2));
+
+// Grid helper
+scene.add(new THREE.GridHelper(4, 20, 0x333366, 0x222244));
+
+let vrm = null;
+let baseHipsY = 0;
+
+// Load VRM
+const loader = new GLTFLoader();
+loader.register(p => new VRMLoaderPlugin(p));
+loader.load('/model.vrm', gltf => {
+  vrm = gltf.userData.vrm;
+  VRMUtils.rotateVRM0(vrm);
+  vrm.scene.traverse(o => { o.frustumCulled = false; });
+  scene.add(vrm.scene);
+  vrm.scene.updateMatrixWorld(true);
+
+  const hips = vrm.humanoid.getNormalizedBoneNode('hips');
+  if (hips) baseHipsY = hips.position.y;
+
+  info.textContent = `VRM loaded. ${Object.keys(poses).length} poses available.`;
+  nameSpan.textContent = 'Rest pose';
+}, undefined, err => { info.textContent = 'Failed to load VRM: ' + err; });
+
+// Discover poses
+const poses = {};
+const resp = await fetch('/animations/poses/');
+if (resp.ok) {
+  const html = await resp.text();
+  const matches = html.matchAll(/href="([^"]+\.json)"/g);
+  for (const m of matches) {
+    const name = m[1].replace('.json', '');
+    poses[name] = null; // lazy loaded
+    const opt = document.createElement('option');
+    opt.value = name;
+    opt.textContent = name;
+    sel.appendChild(opt);
+  }
+}
+// Fallback: try listing known poses
+if (Object.keys(poses).length === 0) {
+  const knownPoses = [
+    'emote_collector_AFK', 'emote_collector_Sit_Girly', 'emote_collector_Sit_KneeBend',
+    'emote_collector_Sit_Spread', 'emote_collector_Sleep_Down', 'emote_collector_Sleep_Side',
+    'emote_collector_Sleep_Sprawled', 'emote_collector_Sleep_Up',
+  ];
+  for (let i = 1; i <= 10; i++) knownPoses.push(`nizi_poses_Pose${String(i).padStart(2,'0')}_Re`);
+  for (const d of ['20251019','20251019-2','20251019-3','20251020','20251021','20251021-2',
+    '20251024','20251024-1','20251024-2','20251025','20251025-2','20251026','20251027','20251029','20251030'])
+    knownPoses.push(`chiu_2025_10_${d}`);
+
+  for (const name of knownPoses) {
+    poses[name] = null;
+    const opt = document.createElement('option');
+    opt.value = name;
+    opt.textContent = name;
+    sel.appendChild(opt);
+  }
+}
+
+async function loadPose(name) {
+  if (!poses[name]) {
+    const r = await fetch(`/animations/poses/${name}.json`);
+    if (r.ok) poses[name] = await r.json();
+    else { info.textContent = `Failed to load ${name}.json`; return null; }
+  }
+  return poses[name];
+}
+
+function resetPose() {
+  if (!vrm) return;
+  vrm.humanoid.resetNormalizedPose();
+  const hips = vrm.humanoid.getNormalizedBoneNode('hips');
+  if (hips) hips.position.y = baseHipsY;
+}
+
+async function applyPose(name) {
+  if (!vrm) return;
+  resetPose();
+  if (!name) { nameSpan.textContent = 'Rest pose'; return; }
+
+  const data = await loadPose(name);
+  if (!data) return;
+
+  const pose = data.pose || data;
+  for (const [bone, quat] of Object.entries(pose)) {
+    const node = vrm.humanoid.getNormalizedBoneNode(bone);
+    if (node && Array.isArray(quat) && quat.length === 4) {
+      node.quaternion.set(quat[0], quat[1], quat[2], quat[3]);
+    }
+  }
+
+  if (data.hipsOffsetY) {
+    const hips = vrm.humanoid.getNormalizedBoneNode('hips');
+    if (hips) hips.position.y = baseHipsY + data.hipsOffsetY;
+  }
+
+  nameSpan.textContent = name;
+  info.textContent = `Applied: ${name} (${Object.keys(pose).length} bones)`;
+}
+
+sel.addEventListener('change', () => applyPose(sel.value));
+document.getElementById('reset-btn').addEventListener('click', () => {
+  sel.value = '';
+  resetPose();
+  nameSpan.textContent = 'Rest pose';
+});
+
+// Animate
+const clock = new THREE.Clock();
+function animate() {
+  requestAnimationFrame(animate);
+  const dt = clock.getDelta();
+  controls.update();
+  if (vrm) vrm.update(dt);
+  renderer.render(scene, camera);
+}
+animate();
+
+window.addEventListener('resize', () => {
+  camera.aspect = wrap.clientWidth / wrap.clientHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(wrap.clientWidth, wrap.clientHeight);
+});
+</script>
+</body>
+</html>

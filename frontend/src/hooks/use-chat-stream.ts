@@ -1,8 +1,7 @@
 import { useState, useCallback, useRef } from "react";
 import { C } from "../theme";
-import type { CompanionTaskState, EmotionType } from "../types/nila";
-import { parseEmotions, emotionToGesture } from "../services/emotionParser";
-import type { AnimationState } from "../types/nila";
+import type { CompanionTaskState, EmotionType, ActionTag, AnimationState } from "../types/nila";
+import { StreamingTagParser, parseEmotions } from "../services/emotionParser";
 
 export type AgentId =
   | "model_router"
@@ -46,6 +45,7 @@ export interface ChatMessage {
   text: string;
   items?: string[];
   generatedFiles?: GeneratedFile[];
+  confirmId?: string;
   createdAt?: string;
 }
 
@@ -69,6 +69,7 @@ export function useChatStream(
   callbacks?: {
     onEmotion?: (e: EmotionType) => void;
     onGesture?: (g: AnimationState) => void;
+    onAction?: (a: ActionTag) => void;
   }
 ) {
   const [agents, setAgents] = useState<Agent[]>(() => buildAgents(mode));
@@ -110,8 +111,10 @@ export function useChatStream(
       setStreamingMessages([]);
       setAgents(buildAgents(mode));
       setRetryActive(false);
-      // Immediately set THINKING when planning begins
       setTaskState("THINKING");
+
+      const tagParser = new StreamingTagParser();
+      let firstTokenReceived = false;
 
       try {
         const response = await fetch(`/api/chat/sessions/${targetSessionId}/stream`, {
@@ -158,17 +161,22 @@ export function useChatStream(
 
                 if (data.type === "token") {
                   const rawToken = data.text || "";
-                  const { cleanText, emotions } = parseEmotions(rawToken);
+                  const { cleanText, emotions, actions } = tagParser.push(rawToken);
 
                   for (const emotion of emotions) {
                     callbacks?.onEmotion?.(emotion);
-                    const gesture = emotionToGesture(emotion);
-                    if (gesture) {
-                      callbacks?.onGesture?.(gesture as AnimationState);
-                    }
+                  }
+                  for (const action of actions) {
+                    callbacks?.onAction?.(action);
                   }
 
                   if (cleanText) {
+                    // First token → transition from THINKING to IDLE (lip-sync handles speaking)
+                    if (!firstTokenReceived) {
+                      firstTokenReceived = true;
+                      setTaskState("IDLE");
+                    }
+
                     setStreamingMessages((prev) => {
                       const liveId = `live_${assignedTaskId}`;
                       const existing = prev.find((m) => m.id === liveId);
@@ -195,11 +203,19 @@ export function useChatStream(
                       ];
                     });
                   }
-                  setTaskState("EXECUTING");
                 } else if (data.type === "tool_start") {
                   setTaskState("EXECUTING");
+                  // Tool-specific action hints
+                  const toolName = (data.tool || "").toLowerCase();
+                  if (toolName.includes("document") || toolName.includes("word") || toolName.includes("powerpoint") || toolName.includes("excel") || toolName.includes("code")) {
+                    callbacks?.onAction?.("typing" as ActionTag);
+                  } else if (toolName.includes("screenshot") || toolName.includes("screen") || toolName.includes("look")) {
+                    callbacks?.onAction?.("present" as ActionTag);
+                  } else if (toolName.includes("search") || toolName.includes("web")) {
+                    callbacks?.onAction?.("think" as ActionTag);
+                  }
                 } else if (data.type === "tool_end") {
-                  // tool finished, stay in EXECUTING
+                  // tool finished
                 } else if (data.type === "task_start") {
                   setTaskState("THINKING");
                 } else if (data.type === "task_state") {
@@ -207,8 +223,10 @@ export function useChatStream(
                     setTaskState("NEEDS_INPUT");
                   } else if (data.status === "completed") {
                     setTaskState("COMPLETED");
+                    callbacks?.onAction?.("happy" as ActionTag);
                   } else if (data.status === "failed") {
                     setTaskState("FAILED");
+                    callbacks?.onAction?.("shrug" as ActionTag);
                   }
                 } else if (data.type === "agent_update") {
                   setAgents((prev) =>
@@ -236,6 +254,22 @@ export function useChatStream(
                   ) {
                     setRetryActive(false);
                   }
+                } else if (data.type === "confirm_request") {
+                  setStreamingMessages((prev) => [
+                    ...prev,
+                    {
+                      id: `confirm_${data.id}`,
+                      sessionId: targetSessionId,
+                      taskId: assignedTaskId,
+                      role: "agent",
+                      agentName: "Nila",
+                      agentColor: C.amber,
+                      kind: "clarification",
+                      text: data.message,
+                      confirmId: data.id,
+                      createdAt: new Date().toISOString(),
+                    } as ChatMessage,
+                  ]);
                 } else if (data.type === "message") {
                   if (data.kind === "clarification") {
                     setTaskState("NEEDS_INPUT");
@@ -253,7 +287,8 @@ export function useChatStream(
                   }));
 
                   const liveId = `live_${assignedTaskId}`;
-                  const { cleanText: msgClean } = parseEmotions(data.text || "");
+                  const msgParsed = parseEmotions(data.text || "");
+                  const msgClean = msgParsed.cleanText;
                   setStreamingMessages((prev) => {
                     const withoutLive = prev.filter((m) => m.id !== liveId);
                     return [

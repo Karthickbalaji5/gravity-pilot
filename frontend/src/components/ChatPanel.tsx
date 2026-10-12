@@ -149,6 +149,54 @@ function FileCard({ file }: { file: GeneratedFile }) {
   );
 }
 
+function ConfirmButtons({ confirmId }: { confirmId: string }) {
+  const [status, setStatus] = useState<"pending" | "approved" | "rejected">("pending");
+
+  const handleConfirm = async (approved: boolean) => {
+    try {
+      await fetch(`/api/confirm/${confirmId}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ approved }),
+      });
+      setStatus(approved ? "approved" : "rejected");
+    } catch {
+      setStatus("rejected");
+    }
+  };
+
+  if (status !== "pending") {
+    return (
+      <div style={{ marginTop: 8, fontSize: 11, fontWeight: 600, color: status === "approved" ? "#2E7D6B" : C.redMuted }}>
+        {status === "approved" ? "Approved" : "Cancelled"}
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+      <button
+        onClick={() => handleConfirm(true)}
+        style={{
+          padding: "6px 16px", borderRadius: 6, background: "#2E7D6B", color: "white",
+          border: "none", fontSize: 12, fontWeight: 600, cursor: "pointer",
+        }}
+      >
+        Yes, proceed
+      </button>
+      <button
+        onClick={() => handleConfirm(false)}
+        style={{
+          padding: "6px 16px", borderRadius: 6, background: "#F1F5F9", color: C.textPrim,
+          border: `1px solid ${C.panelBorder}`, fontSize: 12, fontWeight: 600, cursor: "pointer",
+        }}
+      >
+        No, cancel
+      </button>
+    </div>
+  );
+}
+
 export function ChatPanel({ msgs, mode, onSuggestion }: ChatPanelProps) {
   const bottomRef = useRef<HTMLDivElement>(null);
 
@@ -421,6 +469,11 @@ export function ChatPanel({ msgs, mode, onSuggestion }: ChatPanelProps) {
                   </li>
                 ))}
               </ul>
+            )}
+
+            {/* Confirmation Buttons for delete/move */}
+            {m.confirmId && (
+              <ConfirmButtons confirmId={m.confirmId} />
             )}
 
             {/* Generated Output File Badges */}

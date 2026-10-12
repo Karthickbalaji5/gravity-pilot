@@ -22,9 +22,10 @@ import { NilaSettingsModal } from "./components/NilaSettingsModal";
 import { ScreenshotModal } from "./components/ScreenshotModal";
 import { useChatStream, ChatMessage } from "./hooks/use-chat-stream";
 import { VRMManager } from "./avatar/VRMManager";
+import { PetBrain } from "./avatar/PetBrain";
 import { ttsService } from "./services/tts";
 import { C } from "./theme";
-import type { CompanionTaskState, CompanionWindowMode, EmotionType, VoiceSettings } from "./types/nila";
+import type { CompanionTaskState, CompanionWindowMode, EmotionType, ActionTag, VoiceSettings } from "./types/nila";
 import { SessionItem, OllamaInfo, VoiceState } from "./types";
 import {
   fetchHealth,
@@ -60,6 +61,12 @@ export default function App() {
   const [splitAvatarWidth, setSplitAvatarWidth] = useState<number>(560);
   const [isResizingSplit, setIsResizingSplit] = useState<boolean>(false);
 
+  // Pet mode state
+  const petBrainRef = useRef<PetBrain | null>(null);
+  const [petSpeechBubble, setPetSpeechBubble] = useState<string | null>(null);
+  const [showPetInput, setShowPetInput] = useState(false);
+  const petSpeechTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
   useEffect(() => {
     if (!isResizingSplit) return;
     const handleMouseMove = (e: MouseEvent) => {
@@ -94,6 +101,9 @@ export default function App() {
     },
     onGesture: (g: any) => {
       vrmManagerRef.current?.playGesture(g);
+    },
+    onAction: (a: ActionTag) => {
+      vrmManagerRef.current?.playAction(a);
     },
   }), []);
 
@@ -253,15 +263,64 @@ export default function App() {
     }
   };
 
-  // Update body class for transparent companion mode
+  // Update body class for transparent companion mode (pet mode handled separately)
   useEffect(() => {
     if (windowMode === "companion") {
       document.body.classList.add("electron-transparent");
       document.documentElement.classList.add("electron-transparent");
-    } else {
+    } else if (windowMode !== "pet") {
       document.body.classList.remove("electron-transparent");
       document.documentElement.classList.remove("electron-transparent");
     }
+  }, [windowMode]);
+
+  // Pet mode initialization
+  useEffect(() => {
+    if (windowMode !== "pet") {
+      if (petBrainRef.current) { petBrainRef.current.stop(); petBrainRef.current = null; }
+      vrmManagerRef.current?.setPetMode(false);
+      return;
+    }
+
+    document.body.classList.add("electron-transparent");
+    document.documentElement.classList.add("electron-transparent");
+    vrmManagerRef.current?.setPetMode(true);
+
+    const brain = new PetBrain();
+    petBrainRef.current = brain;
+
+    brain.onAction = (action) => {
+      vrmManagerRef.current?.playAction(action as ActionTag);
+    };
+    brain.onSpeak = (text) => {
+      if (petSpeechTimerRef.current) clearTimeout(petSpeechTimerRef.current);
+      setPetSpeechBubble(text);
+      petSpeechTimerRef.current = setTimeout(() => setPetSpeechBubble(null), 6000);
+    };
+    brain.onMoveBy = (dx, dy) => {
+      (window as any).electronAPI?.petMoveBy?.(dx, dy);
+    };
+
+    brain.start();
+
+    return () => {
+      brain.stop();
+      document.body.classList.remove("electron-transparent");
+      document.documentElement.classList.remove("electron-transparent");
+    };
+  }, [windowMode]);
+
+  // Pet mode keyboard shortcut: Ctrl+Shift+Space to toggle mini chat
+  useEffect(() => {
+    if (windowMode !== "pet") return;
+    const handler = (e: KeyboardEvent) => {
+      if (e.ctrlKey && e.shiftKey && e.code === "Space") {
+        e.preventDefault();
+        setShowPetInput(prev => !prev);
+      }
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
   }, [windowMode]);
 
   // Health check
@@ -575,6 +634,146 @@ export default function App() {
       console.error(e);
     }
   };
+
+  // PET MODE (220x320 desktop pet)
+  if (windowMode === "pet") {
+    return (
+      <div
+        style={{
+          position: "relative",
+          width: "100%",
+          height: "100%",
+          overflow: "hidden",
+          pointerEvents: "none",
+          userSelect: "none",
+        }}
+      >
+        {/* Speech bubble - grows upward */}
+        {petSpeechBubble && (
+          <div
+            style={{
+              position: "absolute",
+              bottom: "calc(100% - 40px)",
+              left: 10,
+              right: 10,
+              zIndex: 40,
+              pointerEvents: "auto",
+              background: "rgba(15, 23, 42, 0.92)",
+              border: "1px solid rgba(168, 85, 247, 0.5)",
+              borderRadius: 12,
+              padding: "8px 12px",
+              fontSize: 12,
+              color: "white",
+              lineHeight: 1.4,
+              maxHeight: 60,
+              overflow: "hidden",
+              backdropFilter: "blur(12px)",
+              boxShadow: "0 -4px 16px rgba(0,0,0,0.4)",
+            }}
+          >
+            {petSpeechBubble}
+          </div>
+        )}
+
+        {/* Avatar viewport */}
+        <div
+          onDoubleClick={() => setShowPetInput(true)}
+          onClick={(e) => {
+            const mgr = vrmManagerRef.current;
+            if (!mgr) return;
+            const rect = (e.target as HTMLElement).getBoundingClientRect();
+            const y = (e.clientY - rect.top) / rect.height;
+            if (y < 0.3) {
+              petBrainRef.current?.handleClick("head");
+            } else {
+              petBrainRef.current?.handleClick("body");
+            }
+          }}
+          style={{
+            position: "absolute",
+            top: 0,
+            left: 0,
+            right: 0,
+            bottom: showPetInput ? 40 : 0,
+            pointerEvents: "auto",
+          }}
+        >
+          <NilaAvatarViewport
+            vrmManagerRef={vrmManagerRef}
+            taskState={taskState}
+            currentEmotion={currentEmotion}
+            isSpeaking={isSpeaking}
+            onEmotionChange={setCurrentEmotion}
+            transparentMode={true}
+          />
+        </div>
+
+        {/* Mini chat input */}
+        {showPetInput && (
+          <div
+            style={{
+              position: "absolute",
+              bottom: 0,
+              left: 0,
+              right: 0,
+              zIndex: 30,
+              pointerEvents: "auto",
+              display: "flex",
+              alignItems: "center",
+              gap: 4,
+              padding: 4,
+              background: "rgba(15, 23, 42, 0.95)",
+              borderTop: "1px solid rgba(168, 85, 247, 0.4)",
+            }}
+          >
+            <input
+              type="text"
+              autoFocus
+              placeholder="Ask Nila..."
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && !e.shiftKey) {
+                  e.preventDefault();
+                  handleSend(input);
+                  setShowPetInput(false);
+                } else if (e.key === "Escape") {
+                  setShowPetInput(false);
+                }
+              }}
+              style={{
+                flex: 1,
+                padding: "6px 8px",
+                borderRadius: 8,
+                background: "rgba(30, 41, 59, 0.9)",
+                border: "1px solid rgba(255, 255, 255, 0.15)",
+                fontSize: 11,
+                color: "white",
+                outline: "none",
+              }}
+            />
+            <button
+              onClick={() => { handleSend(input); setShowPetInput(false); }}
+              disabled={!input.trim()}
+              style={{
+                padding: "6px 8px",
+                borderRadius: 8,
+                background: "#9333ea",
+                color: "white",
+                border: "none",
+                cursor: !input.trim() ? "not-allowed" : "pointer",
+                opacity: !input.trim() ? 0.4 : 1,
+                display: "flex",
+                alignItems: "center",
+              }}
+            >
+              <Send size={12} />
+            </button>
+          </div>
+        )}
+      </div>
+    );
+  }
 
   // COMPANION MODE (Compact Floating Avatar Overlay)
   if (windowMode === "companion") {

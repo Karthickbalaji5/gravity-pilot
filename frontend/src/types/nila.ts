@@ -33,6 +33,10 @@ export type AnimationState =
   | 'COMPLETED'
   | 'FAILED';
 
+export type ActionTag =
+  | 'wave' | 'nod' | 'think' | 'shrug' | 'happy'
+  | 'excited' | 'gotit' | 'proud' | 'present';
+
 export interface VRMDiagnostics {
   loaded: boolean;
   modelName: string;
@@ -61,6 +65,7 @@ export interface VoiceSettings {
 }
 
 export type CompanionWindowMode =
+  | 'pet'        // Small desktop pet sitting on taskbar
   | 'companion'  // Floating transparent avatar widget
   | 'split'      // 3D Avatar on left/top, Chat & Actions on right
   | 'dashboard';  // Full Agent Dashboard with Avatar + Traces + Output Explorer

@@ -15,6 +15,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   startDrag: () => ipcRenderer.invoke('window:startDrag'),
   dragMove: (deltaX, deltaY) => ipcRenderer.invoke('window:dragMove', deltaX, deltaY),
   getQuietMode: () => ipcRenderer.invoke('window:getQuietMode'),
+  setWindowSize: (w, h) => ipcRenderer.invoke('window:setSize', w, h),
+  petMoveBy: (dx, dy) => ipcRenderer.invoke('pet:moveBy', dx, dy),
+  getSystemIdleTime: () => ipcRenderer.invoke('pet:getSystemIdleTime'),
   openFile: (filePath) => ipcRenderer.invoke('shell:openFile', filePath),
   openOutputFolder: () => ipcRenderer.invoke('shell:openOutputFolder'),
   onLayoutChange: (callback) => {

@@ -2,8 +2,9 @@ import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { VRM, VRMLoaderPlugin, VRMUtils } from '@pixiv/three-vrm';
-import type { CompanionTaskState, EmotionType, VisemeType, VRMDiagnostics } from '../types/nila';
+import type { CompanionTaskState, EmotionType, VisemeType, VRMDiagnostics, ActionTag } from '../types/nila';
 import { VRMAnimationController, type AnimationState } from './VRMAnimationController';
+import { ClipLibrary, type ActionName } from './ClipLibrary';
 
 export class VRMManager {
   private container: HTMLElement;
@@ -18,6 +19,7 @@ export class VRMManager {
   private firstFrameRendered = false;
 
   public animationController: VRMAnimationController;
+  public clipLibrary: ClipLibrary;
   public currentVRM: VRM | null = null;
   public diagnostics: VRMDiagnostics = {
     loaded: false,
@@ -58,6 +60,11 @@ export class VRMManager {
   private mouthOpenValue = 0;
   private currentViseme: VisemeType = 'aa';
   private manualSpeechPulse = 0;
+
+  // Pet mode
+  private petMode = false;
+  private lastFrameTime = 0;
+  private readonly PET_FPS = 30;
 
   // Camera framing defaults (full-body default)
   private defaultCameraPos = new THREE.Vector3(0, 0.70, 3.40);
@@ -137,6 +144,7 @@ export class VRMManager {
     this.container = container;
     this.clock = new THREE.Clock();
     this.animationController = new VRMAnimationController();
+    this.clipLibrary = new ClipLibrary();
 
     // Ensure container styling prevents canvas blowout and fills available space
     this.container.style.position = 'absolute';
@@ -434,6 +442,10 @@ export class VRMManager {
           this.diagnostics.availableBones = this.animationController.getAvailableBones();
           this.diagnostics.animationState = this.animationController.getCurrentState();
 
+          // Bind and preload ClipLibrary (non-blocking)
+          this.clipLibrary.bind(vrm);
+          this.clipLibrary.preload().catch(() => {});
+
           // Set default relaxed state
           this.setTaskState('IDLE');
 
@@ -515,6 +527,44 @@ export class VRMManager {
    */
   public pulseMouth(intensity: number = 0.8, vowel: VisemeType = 'aa'): void {
     this.animationController.pulseMouth(intensity, vowel);
+  }
+
+  private static readonly ACTION_TO_ANIM: Record<ActionTag, AnimationState> = {
+    wave: 'GREETING',
+    nod: 'IDLE',
+    think: 'THINKING',
+    shrug: 'IDLE',
+    happy: 'COMPLETED',
+    excited: 'COMPLETED',
+    gotit: 'IDLE',
+    proud: 'PRESENTING',
+    present: 'PRESENTING',
+  };
+
+  public playAction(action: ActionTag): void {
+    const actionName = action as ActionName;
+    if (this.clipLibrary.hasClip(actionName)) {
+      this.clipLibrary.play(actionName);
+    } else {
+      const anim = VRMManager.ACTION_TO_ANIM[action];
+      if (anim) this.playGesture(anim, 3000);
+    }
+  }
+
+  public setPetMode(enabled: boolean): void {
+    this.petMode = enabled;
+    if (enabled) {
+      this.renderer.setPixelRatio(1);
+      this.controls.enabled = false;
+      this.fitCameraToModel('full');
+    } else {
+      this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+      this.controls.enabled = true;
+    }
+  }
+
+  public getAssetTable() {
+    return this.clipLibrary.getAssetTable();
   }
 
   /**
@@ -615,7 +665,14 @@ export class VRMManager {
   private animate = (): void => {
     this.animationFrameId = requestAnimationFrame(this.animate);
 
-    const delta = Math.min(this.clock.getDelta(), 0.05); // clamp delta for physics stability
+    // Pet mode: cap at 30fps
+    if (this.petMode) {
+      const now = performance.now();
+      if (now - this.lastFrameTime < 1000 / this.PET_FPS) return;
+      this.lastFrameTime = now;
+    }
+
+    const delta = Math.min(this.clock.getDelta(), 0.05);
     const time = this.clock.getElapsedTime();
 
     this.controls.update();
@@ -635,6 +692,9 @@ export class VRMManager {
       // 1. Unified Animation Controller: Full-body gestures, organic idle breathing/sway, expressions, and lip-sync
       this.animationController.update(delta, time);
       this.diagnostics.animationState = this.animationController.getCurrentState();
+
+      // 1b. ClipLibrary mixer (file-based animations)
+      this.clipLibrary.update(delta);
 
       // 2. Update VRM spring bones & secondary physics
       this.currentVRM.update(delta);
@@ -694,6 +754,7 @@ export class VRMManager {
       VRMUtils.deepDispose(this.currentVRM.scene);
     }
 
+    this.clipLibrary.destroy();
     this.controls.dispose();
     this.renderer.dispose();
     if (this.renderer.domElement.parentElement) {

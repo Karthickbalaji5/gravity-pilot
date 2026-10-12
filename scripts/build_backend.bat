@@ -32,6 +32,9 @@ pyinstaller --noconfirm --clean ^
   --collect-submodules langchain_groq ^
   --collect-submodules langchain_ollama ^
   --collect-submodules langchain_community ^
+  --collect-submodules langgraph ^
+  --collect-all faster_whisper ^
+  --collect-all edge_tts ^
   main.py
 
 if errorlevel 1 (

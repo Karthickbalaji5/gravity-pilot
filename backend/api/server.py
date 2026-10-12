@@ -323,6 +323,20 @@ async def stt_transcribe(audio: UploadFile = File(...)):
             pass
 
 
+class ConfirmRequest(BaseModel):
+    approved: bool
+
+
+@app.post("/api/confirm/{confirm_id}")
+async def confirm_action_endpoint(confirm_id: str, req: ConfirmRequest):
+    """Approve or reject a pending delete/move confirmation."""
+    from agents.nila_agent import resolve_confirmation
+    result = resolve_confirmation(confirm_id, req.approved)
+    if "error" in result:
+        raise HTTPException(status_code=404, detail=result["error"])
+    return result
+
+
 @app.post("/api/tasks/{task_id}/cancel")
 async def cancel_task_endpoint(task_id: str):
     """Cancel a running or pending task."""
@@ -464,6 +478,9 @@ async def _stream_nila_events(
 
             elif etype == "tool_end":
                 yield f"data: {json.dumps({'type': 'tool_end', 'task_id': task_id, 'session_id': session_id, 'name': event['name'], 'output_path': event.get('output_path')})}\n\n"
+
+            elif etype == "confirm_request":
+                yield f"data: {json.dumps({'type': 'confirm_request', 'task_id': task_id, 'session_id': session_id, 'id': event['id'], 'message': event['message']})}\n\n"
 
             elif etype == "message":
                 final_text = event.get("content", final_text)

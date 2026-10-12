@@ -29,7 +29,7 @@ function saveSettings(patch) {
 }
 
 const savedSettings = loadSettings();
-let currentMode = savedSettings.mode || 'companion';
+let currentMode = savedSettings.mode || 'pet';
 let startWithWindows = savedSettings.startWithWindows || false;
 
 // Enable WebGL transparency and smooth hardware rendering on Windows
@@ -94,16 +94,30 @@ function stopBackend() {
 // ── Window management ───────────────────────────────────────────────────────
 
 function createMainWindow() {
-  const isCompanion = currentMode === 'companion';
+  const isPet = currentMode === 'pet';
+  const isCompanion = currentMode === 'companion' || isPet;
   const saved = loadSettings();
 
-  const defaults = isCompanion
-    ? { width: 380, height: 580, minWidth: 320, minHeight: 440 }
-    : { width: 1240, height: 840, minWidth: 720, minHeight: 540 };
+  let defaults;
+  if (isPet) {
+    defaults = { width: 220, height: 320, minWidth: 180, minHeight: 260 };
+  } else if (currentMode === 'companion') {
+    defaults = { width: 380, height: 580, minWidth: 320, minHeight: 440 };
+  } else {
+    defaults = { width: 1240, height: 840, minWidth: 720, minHeight: 540 };
+  }
 
   const winBounds = saved.windowBounds && saved.windowBounds[currentMode]
     ? saved.windowBounds[currentMode]
     : defaults;
+
+  // Pet mode: sit on taskbar line
+  if (isPet && !winBounds.x) {
+    const primaryDisplay = screen.getPrimaryDisplay();
+    const workArea = primaryDisplay.workArea;
+    winBounds.x = Math.floor(workArea.x + workArea.width / 2 - defaults.width / 2);
+    winBounds.y = workArea.y + workArea.height - defaults.height;
+  }
 
   mainWindow = new BrowserWindow({
     width: winBounds.width || defaults.width,
@@ -114,8 +128,9 @@ function createMainWindow() {
     minHeight: defaults.minHeight,
     transparent: true,
     frame: false,
-    hasShadow: !isCompanion,
+    hasShadow: false,
     alwaysOnTop: isCompanion,
+    skipTaskbar: isPet,
     backgroundColor: '#00000000',
     webPreferences: {
       preload: path.join(__dirname, 'preload.cjs'),
@@ -186,6 +201,12 @@ function updateTray() {
     {
       label: 'Layout Mode',
       submenu: [
+        {
+          label: '🐾 Pet Mode (Desktop Pet)',
+          type: 'radio',
+          checked: currentMode === 'pet',
+          click: () => setWindowMode('pet'),
+        },
         {
           label: '🧚 Floating Companion Mode',
           type: 'radio',
@@ -313,15 +334,33 @@ function setWindowMode(mode) {
   const primaryDisplay = screen.getPrimaryDisplay();
   const { width: screenWidth, height: screenHeight } = primaryDisplay.workArea;
 
-  if (mode === 'companion') {
+  if (mode === 'pet') {
+    const petW = 220;
+    const petH = 320;
+    mainWindow.setAlwaysOnTop(true, 'screen-saver');
+    mainWindow.setResizable(false);
+    mainWindow.setSize(petW, petH);
+    mainWindow.setSkipTaskbar(true);
+    // Sit on taskbar line (bottom of work area)
+    const workArea = primaryDisplay.workArea;
+    const saved = loadSettings();
+    const petX = saved.petX ?? Math.floor(workArea.x + workArea.width / 2 - petW / 2);
+    mainWindow.setPosition(
+      Math.max(workArea.x, Math.min(petX, workArea.x + workArea.width - petW)),
+      workArea.y + workArea.height - petH
+    );
+    mainWindow.setHasShadow(false);
+  } else if (mode === 'companion') {
     const compW = 420;
     const compH = 680;
     mainWindow.setAlwaysOnTop(true, 'screen-saver');
     mainWindow.setResizable(true);
     mainWindow.setSize(compW, compH);
+    mainWindow.setSkipTaskbar(false);
     mainWindow.setPosition(screenWidth - compW - 24, screenHeight - compH - 24);
     mainWindow.setHasShadow(false);
   } else if (mode === 'split') {
+    mainWindow.setSkipTaskbar(false);
     mainWindow.setAlwaysOnTop(false);
     const w = Math.min(1240, screenWidth - 40);
     const h = Math.min(840, screenHeight - 40);
@@ -330,6 +369,7 @@ function setWindowMode(mode) {
     mainWindow.setHasShadow(true);
   } else if (mode === 'dashboard') {
     mainWindow.setAlwaysOnTop(false);
+    mainWindow.setSkipTaskbar(false);
     const w = Math.min(1480, screenWidth - 40);
     const h = Math.min(920, screenHeight - 40);
     mainWindow.setSize(w, h);
@@ -404,6 +444,27 @@ ipcMain.handle('window:dragMove', (_event, deltaX, deltaY) => {
 
 ipcMain.handle('window:getQuietMode', () => {
   return quietMode;
+});
+
+ipcMain.handle('pet:moveBy', (_event, dx) => {
+  if (!mainWindow) return;
+  const primaryDisplay = screen.getPrimaryDisplay();
+  const workArea = primaryDisplay.workArea;
+  const [x, y] = mainWindow.getPosition();
+  const [w] = mainWindow.getSize();
+  const newX = Math.max(workArea.x, Math.min(x + dx, workArea.x + workArea.width - w));
+  mainWindow.setPosition(newX, y);
+  saveSettings({ petX: newX });
+});
+
+ipcMain.handle('pet:getSystemIdleTime', () => {
+  const { powerMonitor } = require('electron');
+  return powerMonitor.getSystemIdleTime();
+});
+
+ipcMain.handle('window:setSize', (_event, width, height) => {
+  if (!mainWindow) return;
+  mainWindow.setSize(width, height);
 });
 
 ipcMain.handle('shell:openFile', async (_event, filePath) => {

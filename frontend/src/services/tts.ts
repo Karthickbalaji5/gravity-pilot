@@ -1,9 +1,10 @@
 import { VRMManager } from '../avatar/VRMManager';
-import type { EmotionType } from '../types/nila';
+import type { EmotionType, ActionTag } from '../types/nila';
 
 interface QueueEntry {
   text: string;
   emotion?: EmotionType;
+  action?: ActionTag;
 }
 
 class TTSService {
@@ -16,6 +17,7 @@ class TTSService {
   private cancelled = false;
   private sentenceBuffer = '';
   private onEmotionChange: ((e: EmotionType) => void) | null = null;
+  private onActionChange: ((a: ActionTag) => void) | null = null;
   private vrmManager: VRMManager | null = null;
   private voiceOptions: { voice?: string; rate?: number; pitch?: number } = {};
   private onSpeakingEnd: (() => void) | null = null;
@@ -72,6 +74,7 @@ class TTSService {
       rate?: number;
       pitch?: number;
       onEmotionChange?: (e: EmotionType) => void;
+      onActionChange?: (a: ActionTag) => void;
       onEnd?: () => void;
     }
   ): void {
@@ -82,6 +85,7 @@ class TTSService {
     this.queue = [];
     this.isProcessing = false;
     this.onEmotionChange = options?.onEmotionChange ?? null;
+    this.onActionChange = options?.onActionChange ?? null;
     this.onSpeakingEnd = options?.onEnd ?? null;
     this.voiceOptions = {
       voice: options?.voice,
@@ -94,7 +98,7 @@ class TTSService {
    * Feed tokens as they arrive. Sentences are extracted on . ! ? or newline
    * and queued for immediate playback.
    */
-  public pushTokens(text: string, currentEmotion?: EmotionType): void {
+  public pushTokens(text: string, currentEmotion?: EmotionType, currentAction?: ActionTag): void {
     if (this.cancelled) return;
     this.sentenceBuffer += text;
 
@@ -103,7 +107,7 @@ class TTSService {
       for (let i = 0; i < sentences.length - 1; i++) {
         const s = sentences[i].trim();
         if (s) {
-          this.queue.push({ text: s, emotion: currentEmotion });
+          this.queue.push({ text: s, emotion: currentEmotion, action: currentAction });
           this.processQueue();
         }
       }
@@ -133,6 +137,9 @@ class TTSService {
 
       if (entry.emotion && this.onEmotionChange) {
         this.onEmotionChange(entry.emotion);
+      }
+      if (entry.action && this.onActionChange) {
+        this.onActionChange(entry.action);
       }
 
       this.isSpeaking = true;
